@@ -87,7 +87,7 @@
 </div>
 
 <script>
-    // ======================== Firebase 配置 ========================
+    // ========== Firebase 配置 ==========
     const firebaseConfig = {
         apiKey: "AIzaSyAjSi2qMgewlHGPTCnb4x6iciIf9X8r6IA",
         authDomain: "gobang-87cd8.firebaseapp.com",
@@ -97,33 +97,34 @@
         appId: "1:435120401564:web:faff4f07cfd580c7de9159",
         measurementId: "G-DJ13R8DFG0"
     };
-    // =========================================================================
+    // =====================================
 
-    if (!firebase.apps.length) {
-        firebase.initializeApp(firebaseConfig);
-    }
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     const database = firebase.database();
 
-    // ----- 游戏配置 -----
+    // 游戏参数
     const boardSize = 15;
     const canvas = document.getElementById('gobangCanvas');
     const ctx = canvas.getContext('2d');
     const cellSize = 560 / boardSize;
 
     let board = Array(boardSize).fill().map(() => Array(boardSize).fill(0));
-    let currentTurn = 1;
-    let playerColor = null;
+    let currentTurn = 1;      // 1:黑棋(先手), 2:白棋
+    let myColor = null;        // 1:黑, 2:白
     let gameOver = false;
     let winner = null;
     let roomId = null;
-    let playerRef = null;
+    let roomRef = null;
+
+    let myPlayerId = null;     // 唯一标识
+    let playerRef = null;      // 自己的占位节点
 
     const turnLabel = document.getElementById('turnLabel');
     const resetBtn = document.getElementById('resetBtn');
     const roomInfoDiv = document.getElementById('roomInfo');
     const statusMsgDiv = document.getElementById('statusMsg');
 
-    // 绘图函数 (无变化)
+    // ----- 绘图（同前，略）-----
     function drawBoard() {
         ctx.fillStyle = '#e3bc8e';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -165,6 +166,7 @@
                 if(board[i][j] !== 0) drawPiece(i, j);
     }
 
+    // 胜负判定
     function checkWin(row, col, playerVal) {
         const dirs = [[1,0],[0,1],[1,1],[1,-1]];
         for(let [dx,dy] of dirs) {
@@ -195,89 +197,99 @@
             else turnLabel.innerText = "🤝 平局";
             return;
         }
-        if(playerColor === null) { turnLabel.innerText = "等待分配颜色..."; return; }
-        const isMyTurn = (currentTurn === playerColor);
-        if(isMyTurn) turnLabel.innerText = (playerColor === 1 ? "⚫ 你的回合 (黑棋)" : "⚪ 你的回合 (白棋)");
-        else turnLabel.innerText = (currentTurn === 1 ? "⚫ 对方落子中..." : "⚪ 对方落子中...");
+        if(myColor === null) {
+            turnLabel.innerText = "等待对手加入...";
+            return;
+        }
+        if(currentTurn === myColor) {
+            turnLabel.innerText = (myColor === 1 ? "⚫ 你的回合 (黑棋)" : "⚪ 你的回合 (白棋)");
+        } else {
+            turnLabel.innerText = (currentTurn === 1 ? "⚫ 对方落子..." : "⚪ 对方落子...");
+        }
     }
 
-    function setBoardFromData(data) {
-        if(!data) return;
-        for(let i=0;i<boardSize;i++) {
-            for(let j=0;j<boardSize;j++) {
-                board[i][j] = data[i]?.[j] || 0;
-            }
-        }
+    function syncFromData(data) {
+        if(!data || !data.board) return;
+        const newBoard = data.board;
+        for(let i=0;i<boardSize;i++)
+            for(let j=0;j<boardSize;j++)
+                board[i][j] = newBoard[i][j] || 0;
         redrawAll();
+        if(data.currentTurn !== undefined) currentTurn = data.currentTurn;
+        if(data.gameOver !== undefined) gameOver = data.gameOver;
+        if(data.winner !== undefined) winner = data.winner;
+        updateUI();
+
+        if(!gameOver && myColor !== null) {
+            if(currentTurn === myColor) statusMsgDiv.innerText = "轮到你了，点击落子";
+            else statusMsgDiv.innerText = "等待对方落子...";
+        } else if(gameOver) {
+            if(winner === 1) statusMsgDiv.innerText = "游戏结束，黑棋获胜！点击新一局";
+            else if(winner === 2) statusMsgDiv.innerText = "游戏结束，白棋获胜！点击新一局";
+            else statusMsgDiv.innerText = "平局！点击新一局";
+        }
     }
 
     function placePiece(row, col) {
         if(gameOver) { statusMsgDiv.innerText = "游戏已结束，请按「新一局」"; return false; }
-        if(playerColor === null) { statusMsgDiv.innerText = "等待对手加入..."; return false; }
-        if(currentTurn !== playerColor) { statusMsgDiv.innerText = "请等待对方落子"; return false; }
+        if(myColor === null) { statusMsgDiv.innerText = "等待对手加入..."; return false; }
+        if(currentTurn !== myColor) { statusMsgDiv.innerText = "请等待对方落子"; return false; }
         if(board[row][col] !== 0) return false;
 
-        // 更新本地
-        board[row][col] = playerColor;
+        board[row][col] = myColor;
         drawPiece(row, col);
-        let win = checkWin(row, col, playerColor);
-        let full = isFull();
-        let gameEnd = false;
-        let winColor = null;
-        if(win) { gameEnd = true; winColor = playerColor; }
+        const win = checkWin(row, col, myColor);
+        const full = isFull();
+        let gameEnd = false, winColor = null;
+        if(win) { gameEnd = true; winColor = myColor; }
         else if(full) { gameEnd = true; winColor = 0; }
 
-        const newTurn = (playerColor === 1 ? 2 : 1);
-        // 注意：需要深拷贝 board，否则 Firebase 可能无法检测变化
-        const boardCopy = board.map(row => [...row]);
-        const updateData = {
+        const nextTurn = (myColor === 1 ? 2 : 1);
+        const boardCopy = board.map(r => [...r]);
+        roomRef.update({
             board: boardCopy,
-            currentTurn: newTurn,
+            currentTurn: nextTurn,
             gameOver: gameEnd,
             winner: winColor
-        };
-        playerRef.update(updateData).catch(err => console.error(err));
+        }).catch(err => console.error(err));
         return true;
     }
 
     function resetGame() {
-        if(!playerRef) return;
+        if(!roomRef) return;
         const emptyBoard = Array(boardSize).fill().map(() => Array(boardSize).fill(0));
-        const resetData = {
+        roomRef.update({
             board: emptyBoard,
             currentTurn: 1,
             gameOver: false,
             winner: null
-        };
-        playerRef.update(resetData).catch(err => console.error(err));
+        }).catch(err => console.error(err));
     }
 
-    // 监听 Firebase 数据变化
+    // 监听房间数据
     function startListening() {
-        playerRef.on('value', (snapshot) => {
+        roomRef.on('value', (snapshot) => {
             const data = snapshot.val();
-            if(!data) return;
-            if(data.board) setBoardFromData(data.board);
-            if(data.currentTurn !== undefined) currentTurn = data.currentTurn;
-            if(data.gameOver !== undefined) gameOver = data.gameOver;
-            if(data.winner !== undefined) winner = data.winner;
-            updateUI();
-
-            if(!gameOver && playerColor !== null) {
-                if(currentTurn === playerColor) statusMsgDiv.innerText = "轮到你了，点击棋盘落子";
-                else statusMsgDiv.innerText = "等待对方落子...";
-            } else if(gameOver) {
-                if(winner === 1) statusMsgDiv.innerText = "游戏结束，黑棋获胜！点击新一局";
-                else if(winner === 2) statusMsgDiv.innerText = "游戏结束，白棋获胜！点击新一局";
-                else statusMsgDiv.innerText = "平局！点击新一局";
-            }
+            if(data) syncFromData(data);
         });
     }
 
-    // 初始化房间和玩家颜色（使用 push 唯一ID方式，简单可靠）
-    function initRoom() {
-        const urlParams = new URLSearchParams(window.location.search);
-        let room = urlParams.get('room');
+    // 清理占位（页面关闭/刷新时自动删除）
+    function setupPresence() {
+        if (!playerRef) return;
+        playerRef.onDisconnect().remove((error) => {
+            if (error) console.error("onDisconnect error:", error);
+        });
+        // 页面关闭前也尝试删除（但 onDisconnect 已经足够）
+        window.addEventListener('beforeunload', () => {
+            if (playerRef) playerRef.remove();
+        });
+    }
+
+    // 初始化房间及玩家分配（基于原子化占位）
+    async function initRoom() {
+        const params = new URLSearchParams(window.location.search);
+        let room = params.get('room');
         if(!room) {
             room = Math.random().toString(36).substring(2, 8);
             const newUrl = `${window.location.origin}${window.location.pathname}?room=${room}`;
@@ -292,77 +304,89 @@
             statusMsgDiv.innerText = "链接已复制，发给朋友吧！";
         });
 
-        const gameRef = database.ref(`games/${roomId}`);
-        playerRef = gameRef;
-
-        // 使用 transaction 原子分配玩家颜色
-        gameRef.transaction((currentData) => {
-            if (currentData === null) {
-                // 房间为空，创建者执黑（1）
-                const emptyBoard = Array(boardSize).fill().map(() => Array(boardSize).fill(0));
-                return {
-                    board: emptyBoard,
-                    currentTurn: 1,
-                    gameOver: false,
-                    winner: null,
-                    blackAssigned: true,
-                    whiteAssigned: false
-                };
-            } else if (!currentData.whiteAssigned && currentData.blackAssigned) {
-                // 已有黑棋，加入者执白（2）
-                currentData.whiteAssigned = true;
-                return currentData;
-            } else {
-                // 房间已满或异常，拒绝
-                return undefined;
-            }
-        }, (error, committed, snapshot) => {
-            if (error) {
-                console.error('Transaction error:', error);
-                statusMsgDiv.innerText = "连接出错，请刷新重试";
-                return;
-            }
-            if (!committed) {
-                statusMsgDiv.innerText = "房间已满，无法加入";
-                return;
-            }
-            // 根据 transaction 结果确定 playerColor
-            const data = snapshot.val();
-            if (data && !data.whiteAssigned && data.blackAssigned) {
-                // 如果此时 whiteAssigned 为 false，说明我们是第一个创建者，并且只有黑棋标记
-                // 但根据 transaction 逻辑，创建者会返回 blackAssigned: true, whiteAssigned: false
-                // 加入者会返回 whiteAssigned: true
-                // 如何区分当前用户是黑还是白？可以在 transaction 之前记录一个临时 ID，但更简单：
-                // 我们再次查询房间，看是否 whiteAssigned 被当前用户设置。实际上，我们可以根据 snapshot 的 before/after 无法直接知道。
-                // 改用另一种方法：在 transaction 成功回调中，重新读取一次房间数据，然后根据是否有 whiteAssigned 且没有其他标记来判断
-                // 但为了简单可靠，我改用以下方式：
-                gameRef.once('value', (snap) => {
-                    const roomData = snap.val();
-                    if (!roomData) return;
-                    if (roomData.blackAssigned && !roomData.whiteAssigned) {
-                        // 只有黑棋存在，说明我们是黑棋（因为我们是第一个）
-                        playerColor = 1;
-                        statusMsgDiv.innerText = "你是黑棋 (先手)，等待白棋加入...";
-                        turnLabel.innerText = "等待对手加入";
-                        startListening();
-                    } else if (roomData.blackAssigned && roomData.whiteAssigned) {
-                        // 黑白都存在，我们需要知道自己到底是哪个。由于我们是加入者，应该为白棋，但也要防止创建者重复判断。
-                        // 创建一个唯一 clientId 记录在数据库？太复杂。这里简单约定：如果进入时已经是满员状态，并且之前的 transaction 没被拒绝，说明我们是新加入的白棋。
-                        // 但是创建者也会进入这个回调，且此时 whiteAssigned 可能还没被设置？因为创建者的回调是第一次，whiteAssigned=false。
-                        // 所以创建者会走第一个分支，加入者走第二个分支。
-                        playerColor = 2;
-                        statusMsgDiv.innerText = "你是白棋 (后手)，等待黑棋落子...";
-                        turnLabel.innerText = "白棋后手";
-                        startListening();
-                    }
+        roomRef = database.ref(`games/${roomId}`);
+        myPlayerId = Date.now() + '-' + Math.random().toString(36);
+        
+        // 尝试先获取房间当前玩家信息
+        const snapshot = await roomRef.once('value');
+        let currentData = snapshot.val();
+        
+        if (!currentData) {
+            // 房间不存在，创建者执黑
+            const emptyBoard = Array(boardSize).fill().map(() => Array(boardSize).fill(0));
+            const init = {
+                board: emptyBoard,
+                currentTurn: 1,
+                gameOver: false,
+                winner: null,
+                blackId: myPlayerId,   // 黑棋占位
+                whiteId: null
+            };
+            await roomRef.set(init);
+            myColor = 1;
+            statusMsgDiv.innerText = "你是黑棋 (先手)，等待白棋加入...";
+            turnLabel.innerText = "等待对手加入";
+            // 监听 blackId 变化（实际上 whiteId 设置后对手出现）
+            startListening();
+            // 设置自己占位清理
+            playerRef = roomRef.child('blackId');
+            setupPresence();
+        } else {
+            // 房间已存在
+            if (currentData.blackId && !currentData.whiteId) {
+                // 黑棋已有，尝试成为白棋
+                // 为防止并发，使用 transaction 来设置 whiteId（只有为空时才能设置）
+                const whiteResult = await roomRef.child('whiteId').transaction((current) => {
+                    if (current === null) return myPlayerId;
+                    else return; // 已被占用，中止
                 });
+                if (whiteResult.committed) {
+                    myColor = 2;
+                    statusMsgDiv.innerText = "你是白棋 (后手)，等待黑棋落子...";
+                    turnLabel.innerText = "白棋后手";
+                    startListening();
+                    playerRef = roomRef.child('whiteId');
+                    setupPresence();
+                } else {
+                    // 白棋已被其他人抢占了（并发），或者房间已满
+                    statusMsgDiv.innerText = "房间已满，无法加入";
+                    turnLabel.innerText = "房间已满";
+                    return;
+                }
+            } else if (currentData.blackId && currentData.whiteId) {
+                statusMsgDiv.innerText = "房间已满，无法加入";
+                turnLabel.innerText = "房间已满";
+                return;
             } else {
-                // 异常
-                console.warn('Unexpected transaction result', data);
+                // 理论上 blackId 应该存在，若不存在（异常）则重置为黑棋
+                // 这里做容错：如果 blackId 为空，则尝试设置黑棋
+                const blackResult = await roomRef.child('blackId').transaction((current) => {
+                    if (current === null) return myPlayerId;
+                    else return;
+                });
+                if (blackResult.committed) {
+                    // 初始棋盘也需要设置
+                    const emptyBoard = Array(boardSize).fill().map(() => Array(boardSize).fill(0));
+                    await roomRef.update({
+                        board: emptyBoard,
+                        currentTurn: 1,
+                        gameOver: false,
+                        winner: null
+                    });
+                    myColor = 1;
+                    statusMsgDiv.innerText = "你是黑棋 (先手)，等待白棋加入...";
+                    turnLabel.innerText = "等待对手加入";
+                    startListening();
+                    playerRef = roomRef.child('blackId');
+                    setupPresence();
+                } else {
+                    statusMsgDiv.innerText = "房间状态异常，请刷新重试";
+                }
             }
-        });
+        }
     }
 
+    // 鼠标交互
     function getNearestGrid(mouseX, mouseY) {
         const rect = canvas.getBoundingClientRect();
         const scaleX = canvas.width / rect.width;
@@ -371,21 +395,19 @@
         const canvasY = (mouseY - rect.top) * scaleY;
         let col = Math.round(canvasX / cellSize);
         let row = Math.round(canvasY / cellSize);
-        if(col < 0) col = 0; if(col >= boardSize) col = boardSize-1;
-        if(row < 0) row = 0; if(row >= boardSize) row = boardSize-1;
+        col = Math.min(Math.max(0, col), boardSize-1);
+        row = Math.min(Math.max(0, row), boardSize-1);
         const exactX = col * cellSize, exactY = row * cellSize;
-        if(Math.hypot(canvasX - exactX, canvasY - exactY) > cellSize * 0.45) return null;
+        if (Math.hypot(canvasX - exactX, canvasY - exactY) > cellSize * 0.45) return null;
         return {row, col};
     }
 
     canvas.addEventListener('click', (e) => {
-        if(gameOver) { statusMsgDiv.innerText = "游戏已结束，请按「新一局」"; return; }
+        if (gameOver) { statusMsgDiv.innerText = "游戏已结束，按新一局继续"; return; }
         const grid = getNearestGrid(e.clientX, e.clientY);
-        if(grid) placePiece(grid.row, grid.col);
+        if (grid) placePiece(grid.row, grid.col);
     });
-    resetBtn.addEventListener('click', () => {
-        resetGame();
-    });
+    resetBtn.addEventListener('click', () => resetGame());
 
     drawBoard();
     initRoom();
